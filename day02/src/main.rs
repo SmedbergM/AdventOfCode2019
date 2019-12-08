@@ -128,7 +128,7 @@ fn main() {
             puzzle_xy.set(noun, verb);
             puzzle_xy.run();
             if puzzle_xy.head() == target {
-                println!("Computed target {} with noun/verb {}{}", target, noun, verb);
+                println!("Computed target {} with noun/verb {}", target, 10*noun + verb);
                 break
             }
         }
