@@ -2,18 +2,20 @@ use std::collections::VecDeque;
 
 #[derive(Clone)]
 pub struct Program {
-    memory: Vec<i32>,
+    memory: Vec<i64>,
     instruction_pointer: usize,
-    return_code: Option<i32>,
-    input_buffer: VecDeque<i32>
+    relative_base: i64,
+    return_code: Option<i64>,
+    input_buffer: VecDeque<i64>
 }
 
 impl Program {
     pub fn from_str(line: &str) -> Program {
-        let memory: Vec<i32> = line.split(",")
-            .flat_map(|s| i32::from_str_radix(s, 10).ok()).collect();
+        let memory: Vec<i64> = line.split(",")
+            .flat_map(|s| i64::from_str_radix(s, 10).ok()).collect();
         Program { memory,
             instruction_pointer: 0,
+            relative_base: 0,
             return_code: None,
             input_buffer: VecDeque::new()
         }
@@ -29,36 +31,55 @@ impl Program {
         }
     }
 
-    fn get(&self, idx: usize, mode: &ParameterMode) -> i32 {
-        match mode {
-            ParameterMode::Immediate => self.memory[idx],
-            ParameterMode::Positional => self.memory[self.memory[idx] as usize]
+    fn get(&mut self, idx: usize, mode: &ParameterMode) -> i64 {
+        let read_idx = match mode {
+            ParameterMode::Immediate => idx,
+            ParameterMode::Positional => self.memory[idx] as usize,
+            ParameterMode::Relative => self.relative_idx(idx)
+        };
+        if read_idx >= self.memory.len() {
+            self.memory.resize(read_idx + 1, 0);
         }
+        self.memory[read_idx]
     }
 
-    pub fn read_input(&mut self, input: i32) {
+    fn relative_idx(&self, idx: usize) -> usize {
+        (self.relative_base + self.memory[idx]) as usize
+    }
+
+    pub fn read_input(&mut self, input: i64) {
         self.input_buffer.push_back(input)
     }
 
-    fn set(&mut self, idx: usize, value: i32) {
-        let idx2 = self.memory[idx] as usize;
-        self.memory[idx2] = value;
+    fn set(&mut self, idx: usize, value: i64, mode: &ParameterMode) {
+        let write_idx = match mode {
+            ParameterMode::Positional => self.memory[idx] as usize,
+            ParameterMode::Relative => self.relative_idx(idx),
+            _ => {
+                eprintln!("Setting values in Immediate mode is not supported!");
+                idx
+            }
+        };
+        if write_idx >= self.memory.len() {
+            self.memory.resize(write_idx + 1, 0);
+        }
+        self.memory[write_idx] = value;
     }
 
-    fn perform_add(&mut self, m1: &ParameterMode, m2: &ParameterMode) {
+    fn perform_add(&mut self, m1: &ParameterMode, m2: &ParameterMode, m3: &ParameterMode) {
         let addend1 = self.get(self.instruction_pointer + 1, m1);
         let addend2 = self.get(self.instruction_pointer + 2, m2);
-        self.set(self.instruction_pointer + 3, addend1 + addend2);
+        self.set(self.instruction_pointer + 3, addend1 + addend2, m3);
     }
 
-    fn perform_mult(&mut self, m1: &ParameterMode, m2: &ParameterMode) {
+    fn perform_mult(&mut self, m1: &ParameterMode, m2: &ParameterMode, m3: &ParameterMode) {
         let factor1 = self.get(self.instruction_pointer + 1, m1);
         let factor2 = self.get(self.instruction_pointer + 2, m2);
-        self.set(self.instruction_pointer + 3, factor1 * factor2);
+        self.set(self.instruction_pointer + 3, factor1 * factor2, m3);
     }
 
-    fn perform_save(&mut self, input: Option<i32>) {
-        self.set(self.instruction_pointer + 1, input.unwrap())
+    fn perform_input(&mut self, input: Option<i64>, mode: &ParameterMode) {
+        self.set(self.instruction_pointer + 1, input.unwrap(), mode)
     }
 
     fn perform_jump_if(&mut self, nonzero: bool, m1: &ParameterMode, m2: &ParameterMode) -> bool {
@@ -72,35 +93,40 @@ impl Program {
         }
     }
 
-    fn perform_less_than(&mut self, m1: &ParameterMode, m2: &ParameterMode) {
+    fn perform_less_than(&mut self, m1: &ParameterMode, m2: &ParameterMode, m3: &ParameterMode) {
         let p1 = self.get(self.instruction_pointer + 1, m1);
         let p2 = self.get(self.instruction_pointer + 2, m2);
-        self.set(self.instruction_pointer + 3, (p1 < p2) as i32);
+        self.set(self.instruction_pointer + 3, (p1 < p2) as i64, m3);
     }
 
-    fn perform_equals(&mut self, m1: &ParameterMode, m2: &ParameterMode) {
+    fn perform_equals(&mut self, m1: &ParameterMode, m2: &ParameterMode, m3: &ParameterMode) {
         let p1 = self.get(self.instruction_pointer + 1, m1);
         let p2 = self.get(self.instruction_pointer + 2, m2);
-        self.set(self.instruction_pointer + 3, (p1 == p2) as i32);
+        self.set(self.instruction_pointer + 3, (p1 == p2) as i64, m3);
+    }
+
+    fn perform_rba(&mut self, m1: &ParameterMode) {
+        let delta = self.get(self.instruction_pointer + 1, m1);
+        self.relative_base += delta;
     }
 
     fn step<'a, F>(&mut self, on_output: &mut F) -> State
-        where F: FnMut(i32) {
+        where F: FnMut(i64) {
 
             let instruction = self.current_instruction().unwrap();
             let (next_state, jumped) = match &instruction { // in a real implementation, this would probably need to be wrapped in a Result or something
                 Instruction::Halt => (State::Done, false),
-                Instruction::Add { m1, m2 } => {
-                    self.perform_add(&m1, &m2);
+                Instruction::Add { m1, m2, m3 } => {
+                    self.perform_add(&m1, &m2, &m3);
                     (State::Running, false)
                 },
-                Instruction::Mult { m1, m2 } => {
-                    self.perform_mult(&m1, &m2);
+                Instruction::Mult { m1, m2, m3 } => {
+                    self.perform_mult(&m1, &m2, &m3);
                     (State::Running, false)
                 },
-                Instruction::Save => {
+                Instruction::Input { m1 } => {
                     let next_input = self.input_buffer.pop_front();
-                    self.perform_save(next_input);
+                    self.perform_input(next_input, &m1);
                     (State::Running, false)
                 },
                 Instruction::Output { m1 } => {
@@ -117,12 +143,16 @@ impl Program {
                     let jumped = self.perform_jump_if(false, &m1, &m2);
                     (State::Running, jumped)
                 },
-                Instruction::LessThan { m1, m2 } => {
-                    self.perform_less_than(&m1, &m2);
+                Instruction::LessThan { m1, m2, m3 } => {
+                    self.perform_less_than(&m1, &m2, &m3);
                     (State::Running, false)
                 },
-                Instruction::Equals { m1, m2 } => {
-                    self.perform_equals(&m1, &m2);
+                Instruction::Equals { m1, m2, m3 } => {
+                    self.perform_equals(&m1, &m2, &m3);
+                    (State::Running, false)
+                },
+                Instruction::RelativeBaseAdjust { m1 } => {
+                    self.perform_rba(&m1);
                     (State::Running, false)
                 }
             };
@@ -130,12 +160,12 @@ impl Program {
             next_state
         }    
 
-    pub fn run_and_print(&mut self, inputs: &[i32]) -> Option<i32> {
+    pub fn run_and_print(&mut self, inputs: &[i64]) -> Option<i64> {
         self.run(inputs, |x| {println!("Output: {}", &x)})
     }
 
-    pub fn run<F>(&mut self, inputs: &[i32], mut on_output: F) -> Option<i32>
-        where F: FnMut(i32) {
+    pub fn run<F>(&mut self, inputs: &[i64], mut on_output: F) -> Option<i64>
+        where F: FnMut(i64) {
         for input in inputs {
             self.read_input(*input);
         }
@@ -143,8 +173,8 @@ impl Program {
         self.return_code
     }
 
-    pub fn await_output<F>(&mut self, on_output: &mut F) -> Option<i32>
-    where F: FnMut(i32) {
+    pub fn await_output<F>(&mut self, on_output: &mut F) -> Option<i64>
+    where F: FnMut(i64) {
         
         let mut last_output = None;
         while let None = last_output {
@@ -175,14 +205,15 @@ enum State {
 
 enum Instruction {
     Halt,
-    Add { m1: ParameterMode, m2: ParameterMode },
-    Mult { m1: ParameterMode, m2: ParameterMode },
-    Save,
+    Add { m1: ParameterMode, m2: ParameterMode, m3: ParameterMode },
+    Mult { m1: ParameterMode, m2: ParameterMode, m3: ParameterMode },
+    Input { m1: ParameterMode },
     Output { m1: ParameterMode },
     JumpIfTrue { m1: ParameterMode, m2: ParameterMode },
     JumpIfFalse { m1: ParameterMode, m2: ParameterMode },
-    LessThan { m1: ParameterMode, m2: ParameterMode },
-    Equals { m1: ParameterMode, m2: ParameterMode }
+    LessThan { m1: ParameterMode, m2: ParameterMode, m3: ParameterMode },
+    Equals { m1: ParameterMode, m2: ParameterMode, m3: ParameterMode },
+    RelativeBaseAdjust { m1: ParameterMode }
 }
 
 impl Instruction {
@@ -192,98 +223,102 @@ impl Instruction {
             Instruction::Halt => 1,
             Instruction::Add { .. } => 4,
             Instruction::Mult { .. } => 4,
-            Instruction::Save => 2,
+            Instruction::Input { .. } => 2,
             Instruction::Output { .. } => 2,
             Instruction::JumpIfTrue { .. } => 3,
             Instruction::JumpIfFalse { .. } => 3,
             Instruction::LessThan { .. } => 4,
-            Instruction::Equals { .. } => 4
+            Instruction::Equals { .. } => 4,
+            Instruction::RelativeBaseAdjust { .. } => 2
         }
     }
 
-    fn parse(abcde: &i32) -> Option<Instruction> {
+    fn parse(abcde: &i64) -> Option<Instruction> {
         match abcde.rem_euclid(100) {
             99 => Some(Instruction::Halt),
-            1 => Instruction::parse_add(abcde / 100),
-            2 => Instruction::parse_mult(abcde / 100),
-            3 => Some(Instruction::Save),
-            4 => Instruction::parse_output(abcde / 100),
-            5 => Instruction::parse_jump_if_true(abcde / 100),
-            6 => Instruction::parse_jump_if_false(abcde / 100),
-            7 => Instruction::parse_less_than(abcde / 100),
-            8 => Instruction::parse_equals(abcde / 100),
+            1 => {
+                Instruction::parse_three(abcde / 100).map(|(m1, m2, m3)| {
+                    Instruction::Add { m1, m2, m3 }
+                })
+            },
+            2 => {
+                Instruction::parse_three(abcde / 100).map(|(m1, m2, m3)| {
+                    Instruction::Mult { m1, m2, m3 }
+                })
+            },
+            3 => {
+                Instruction::parse_one(abcde / 100).map(|m1| Instruction::Input { m1 })
+            },
+            4 => {
+                Instruction::parse_one(abcde / 100).map(|m1| Instruction::Output { m1 })
+            },
+            5 => {
+                Instruction::parse_two(abcde / 100).map(|(m1, m2)| {
+                    Instruction::JumpIfTrue { m1, m2 }
+                })
+            },
+            6 => {
+                Instruction::parse_two(abcde / 100).map(|(m1, m2)| {
+                    Instruction::JumpIfFalse { m1, m2 }
+                })
+            },
+            7 => {
+                Instruction::parse_three(abcde / 100).map(|(m1, m2, m3)| {
+                    Instruction::LessThan { m1, m2, m3 }
+                })
+            },
+            8 => {
+                Instruction::parse_three(abcde / 100).map(|(m1, m2, m3)| {
+                    Instruction::Equals { m1, m2, m3 }
+                })
+            },
+            9 => {
+                Instruction::parse_one(abcde / 100).map(|m1| Instruction::RelativeBaseAdjust { m1 })
+            }
             _ => None
         }
     }
 
-    fn parse_add(abc: i32) -> Option<Instruction> {
+    fn parse_one(abc: i64) -> Option<ParameterMode> {
+        ParameterMode::of(&abc.rem_euclid(10))
+    }
+
+    fn parse_two(abc: i64) -> Option<(ParameterMode, ParameterMode)> {
         let c = abc.rem_euclid(10);
         let b = (abc / 10).rem_euclid(10);
         ParameterMode::of(&c).and_then(|m1| {
             ParameterMode::of(&b).map(|m2| {
-                Instruction::Add { m1, m2 }
+                (m1, m2)
             })
         })
     }
 
-    fn parse_mult(abc: i32) -> Option<Instruction> {
+    fn parse_three(abc: i64) -> Option<(ParameterMode, ParameterMode, ParameterMode)> {
         let c = abc.rem_euclid(10);
         let b = (abc / 10).rem_euclid(10);
+        let a = (abc / 100).rem_euclid(10);
         ParameterMode::of(&c).and_then(|m1| {
-            ParameterMode::of(&b).map(|m2| {
-                Instruction::Mult { m1, m2 }
+            ParameterMode::of(&b).and_then(|m2| {
+                ParameterMode::of(&a).map(|m3| {
+                    (m1, m2, m3)
+                })
             })
-        })  
-    }
-
-    fn parse_output(abc: i32) -> Option<Instruction> {
-        let c = abc.rem_euclid(10);
-        ParameterMode::of(&c).map(|m1| Instruction::Output { m1 })
-    }
-
-    fn parse_jump_if_true(abc: i32) -> Option<Instruction> {
-        let c = abc.rem_euclid(10);
-        let d = (abc / 10).rem_euclid(10);
-        ParameterMode::of(&c).and_then(|m1| { ParameterMode::of(&d).map(|m2| {
-            Instruction::JumpIfTrue { m1, m2 }
-        })})
-    }
-
-    fn parse_jump_if_false(abc: i32) -> Option<Instruction> {
-        let c = abc.rem_euclid(10);
-        let d = (abc / 10).rem_euclid(10);
-        ParameterMode::of(&c).and_then(|m1| { ParameterMode::of(&d).map(|m2| {
-            Instruction::JumpIfFalse { m1, m2 }
-        })})
-    }
-
-    fn parse_less_than(abc: i32) -> Option<Instruction> {
-        let c = abc.rem_euclid(10);
-        let d = (abc / 10).rem_euclid(10);
-        ParameterMode::of(&c).and_then(|m1| { ParameterMode::of(&d).map(|m2| {
-            Instruction::LessThan { m1, m2 }
-        })})
-    }
-
-    fn parse_equals(abc: i32) -> Option<Instruction> {
-        let c = abc.rem_euclid(10);
-        let d = (abc / 10).rem_euclid(10);
-        ParameterMode::of(&c).and_then(|m1| { ParameterMode::of(&d).map(|m2| {
-            Instruction::Equals { m1, m2 }
-        })})
+        })
     }
 }
 
 enum ParameterMode {
     Positional,
-    Immediate
+    Immediate,
+    Relative
 }
 
 impl ParameterMode {
-    fn of(k: &i32) -> Option<ParameterMode> {
+    fn of(k: &i64) -> Option<ParameterMode> {
         match k {
             0 => Some(ParameterMode::Positional),
             1 => Some(ParameterMode::Immediate),
+            2 => Some(ParameterMode::Relative),
             _ => None            
         }
     }
@@ -562,7 +597,7 @@ mod day05_tests {
         assert_eq!(last_output, None);
 
         let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some((input != 0) as i32));
+        assert_eq!(last_output, Some((input != 0) as i64));
         assert_eq!(state, State::Running);
 
         let mut program = Program::from_str(code);
@@ -580,7 +615,7 @@ mod day05_tests {
         assert_eq!(last_output, None);
 
         let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some((input != 0) as i32));
+        assert_eq!(last_output, Some((input != 0) as i64));
         assert_eq!(state, State::Running);
 
         let mut program = Program::from_str(code);
@@ -598,7 +633,7 @@ mod day05_tests {
         assert_eq!(last_output, None);
 
         let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some((input != 0) as i32));
+        assert_eq!(last_output, Some((input != 0) as i64));
         assert_eq!(state, State::Running);
     }
 
@@ -645,5 +680,35 @@ mod day05_tests {
         program.step(&mut |_| { });
 
         assert_ne!(program.instruction_pointer, program2.instruction_pointer);
+    }
+}
+
+#[cfg(test)]
+mod relative_base_test {
+    use super::*;
+
+    #[test]
+    fn quine_test() {
+        let mut program = Program::from_str("109,1,204,-1,1001,100,1,100,1008,100,16,101,1006,101,0,99");
+        let mut outputs = vec!();
+        program.run(&[], &mut |x| { outputs.push(x)});
+
+        assert_eq!(outputs[..], [109,1,204,-1,1001,100,1,100,1008,100,16,101,1006,101,0,99]);
+    }
+
+    #[test]
+    fn long_test() {
+        let mut program = Program::from_str("1102,34915192,34915192,7,4,7,99,0");
+        let mut out = 0;
+        program.run(&[], &mut |x| { out = x});
+
+        let out_str = format!("{}", out);
+        assert_eq!(out_str.len(), 16);
+
+        let mut program = Program::from_str("104,1125899906842624,99");
+        out = 0;
+        program.run(&[], &mut |x| { out = x});
+        
+        assert_eq!(out, 1125899906842624);
     }
 }

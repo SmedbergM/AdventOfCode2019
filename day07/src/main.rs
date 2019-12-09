@@ -55,12 +55,12 @@ impl Iterator for Permutations {
     }
 }
 
-fn amp_stack(program: &Program, perm: &Vec<u8>) -> Option<i32> {
+fn amp_stack(program: &Program, perm: &Vec<u8>) -> Option<i64> {
     let mut prev_return_code = 0;
 
     for i in 0..5 {
         let mut inputs = vec!();
-        inputs.push(perm[i] as i32);
+        inputs.push(perm[i] as i64);
         inputs.push(prev_return_code);
 
         let mut amp = program.clone();
@@ -76,10 +76,10 @@ fn amp_stack(program: &Program, perm: &Vec<u8>) -> Option<i32> {
     Some(prev_return_code)
 }
 
-fn amp_stack_feeback(program: &Program, perm: &Vec<u8>) -> Option<i32> {
+fn amp_stack_feeback(program: &Program, perm: &Vec<u8>) -> Option<i64> {
     let mut amps: Vec<Program> = (0..5).map(|i| {
         let mut p = program.clone();
-        p.read_input((perm[i] + 5) as i32);
+        p.read_input((perm[i] + 5) as i64);
         p
     }).collect();
 
@@ -96,8 +96,8 @@ fn amp_stack_feeback(program: &Program, perm: &Vec<u8>) -> Option<i32> {
     return Some(last_output)
 }
 
-fn best_amp_stack(program: &Program) -> i32 {
-    let mut m = i32::min_value();
+fn best_amp_stack(program: &Program) -> i64 {
+    let mut m = i64::min_value();
     for perm in Permutations::new(5) {
         if let Some(x) = amp_stack(&program, &perm) {
             if x > m {
@@ -109,8 +109,8 @@ fn best_amp_stack(program: &Program) -> i32 {
     m
 }
 
-fn best_amp_stack_feedback(program: &Program) -> i32 {
-    let mut m = i32::min_value();
+fn best_amp_stack_feedback(program: &Program) -> i64 {
+    let mut m = i64::min_value();
     for perm in Permutations::new(5) {
         if let Some(x) = amp_stack_feeback(&program, &perm) {
             if x > m {
