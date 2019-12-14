@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::convert::TryFrom;
 
 #[derive(Clone)]
 pub struct Program {
@@ -31,7 +32,7 @@ impl Program {
         }
     }
 
-    fn get(&mut self, idx: usize, mode: &ParameterMode) -> i64 {
+    fn get(&mut self, idx: usize, mode: &ParameterMode) -> Option<i64> {
         let read_idx = match mode {
             ParameterMode::Immediate => idx,
             ParameterMode::Positional => self.memory[idx] as usize,
@@ -40,7 +41,7 @@ impl Program {
         if read_idx >= self.memory.len() {
             self.memory.resize(read_idx + 1, 0);
         }
-        self.memory[read_idx]
+        self.memory.get(read_idx).map(|x| *x)
     }
 
     fn relative_idx(&self, idx: usize) -> usize {
@@ -66,126 +67,156 @@ impl Program {
         self.memory[write_idx] = value;
     }
 
-    fn perform_add(&mut self, m1: &ParameterMode, m2: &ParameterMode, m3: &ParameterMode) {
-        let addend1 = self.get(self.instruction_pointer + 1, m1);
-        let addend2 = self.get(self.instruction_pointer + 2, m2);
-        self.set(self.instruction_pointer + 3, addend1 + addend2, m3);
-    }
+    fn step(&mut self) -> State {
+        enum StepResult {
+            Halt,
+            Jump,
+            Crash,
+            Fwd(usize),
+            Output(i64)
+        }
 
-    fn perform_mult(&mut self, m1: &ParameterMode, m2: &ParameterMode, m3: &ParameterMode) {
-        let factor1 = self.get(self.instruction_pointer + 1, m1);
-        let factor2 = self.get(self.instruction_pointer + 2, m2);
-        self.set(self.instruction_pointer + 3, factor1 * factor2, m3);
-    }
+        fn perform_jump_if(this: &mut Program, nonzero: bool, m1: &ParameterMode, m2: &ParameterMode) -> StepResult {
+            match this.get(this.instruction_pointer + 1, m1) {
+                None => StepResult::Crash,
+                Some(p1) if (p1 != 0) == nonzero => match this.get(this.instruction_pointer + 2, m2) {
+                    None => StepResult::Crash,
+                    Some(p2) => match usize::try_from(p2) {
+                        Err(_) => StepResult::Crash,
+                        Ok(p2) => {
+                            this.instruction_pointer = p2;
+                            StepResult::Jump
+                        }
+                    }
+                },
+                _ => StepResult::Fwd(3)
+            }
+        };
+    
+        let step_result = match self.current_instruction() {
+            None => StepResult::Crash,
+            Some(Instruction::Halt) => StepResult::Halt,
+            Some(Instruction::Add { m1, m2, m3 }) => {
+                let addend1 = self.get(self.instruction_pointer + 1, &m1).unwrap();
+                let addend2 = self.get(self.instruction_pointer + 2, &m2).unwrap();
+                self.set(self.instruction_pointer + 3, addend1 + addend2, &m3);
+                StepResult::Fwd(4)
+            },
+            Some(Instruction::Mult { m1, m2, m3 }) => {
+                let factor1 = self.get(self.instruction_pointer + 1, &m1).unwrap();
+                let factor2 = self.get(self.instruction_pointer + 2, &m2).unwrap();
+                self.set(self.instruction_pointer + 3, factor1 * factor2, &m3);
+                StepResult::Fwd(4)
+            },
+            Some(Instruction::Input { m1 }) => {
+                match self.input_buffer.pop_front() {
+                    None => StepResult::Crash,
+                    Some(input) => {
+                        self.set(self.instruction_pointer + 1, input, &m1);
+                        StepResult::Fwd(2)
+                    }
+                }
+            },
+            Some(Instruction::Output { m1 }) => {
+                match self.get(self.instruction_pointer + 1, &m1) {
+                    None => StepResult::Crash,
+                    Some(out) => {
+                        self.return_code = Some(out);
+                        StepResult::Output(out)
+                    }
+                }
+            },
+            Some(Instruction::JumpIfTrue { m1, m2 }) => perform_jump_if(self, true, &m1, &m2),
+            Some(Instruction::JumpIfFalse { m1, m2 }) => perform_jump_if(self, false, &m1, &m2),
+            Some(Instruction::LessThan { m1, m2, m3 }) => {
+                match self.get(self.instruction_pointer + 1, &m1).and_then(|p1| self.get(self.instruction_pointer + 2, &m2).map(|p2| (p1, p2))) {
+                    None => StepResult::Crash,
+                    Some((p1, p2)) => {
+                        self.set(self.instruction_pointer + 3, (p1 < p2) as i64, &m3);
+                        StepResult::Fwd(4)
+                    }
+                }
+            },
+            Some(Instruction::Equals { m1, m2, m3 }) => {
+                match self.get(self.instruction_pointer + 1, &m1).and_then(|p1| self.get(self.instruction_pointer + 2, &m2).map(|p2| (p1, p2))) {
+                    None => StepResult::Crash,
+                    Some((p1, p2)) => {
+                        self.set(self.instruction_pointer + 3, (p1 == p2) as i64, &m3);
+                        StepResult::Fwd(4)
+                    }
+                }
+            },
+            Some(Instruction::RelativeBaseAdjust { m1 }) => {
+                match self.get(self.instruction_pointer + 1, &m1) {
+                    None => StepResult::Crash,
+                    Some(p1) => {
+                        self.relative_base += p1;
+                        StepResult::Fwd(2)
+                    }
+                }
+            }
+        };
 
-    fn perform_input(&mut self, input: Option<i64>, mode: &ParameterMode) {
-        self.set(self.instruction_pointer + 1, input.unwrap(), mode)
-    }
-
-    fn perform_jump_if(&mut self, nonzero: bool, m1: &ParameterMode, m2: &ParameterMode) -> bool {
-        let p1 = self.get(self.instruction_pointer + 1, m1);
-        if (p1 != 0) == nonzero {
-            let p2 = self.get(self.instruction_pointer + 2, m2);
-            self.instruction_pointer = p2 as usize;
-            true
-        } else {
-            false
+        match step_result {
+            StepResult::Crash => {
+                return State::Crashed;
+            },
+            StepResult::Output(out) => {
+                self.instruction_pointer += 2;
+                return State::Output(out);
+            }
+            StepResult::Fwd(len) => {
+                self.instruction_pointer += len;
+            },
+            _ => ()
+        };
+        match self.current_instruction() {
+            Some(Instruction::Halt) => State::Done,
+            Some(Instruction::Input { .. }) => State::AwaitingInput,
+            None => State::Crashed,
+            _ => State::Running
         }
     }
-
-    fn perform_less_than(&mut self, m1: &ParameterMode, m2: &ParameterMode, m3: &ParameterMode) {
-        let p1 = self.get(self.instruction_pointer + 1, m1);
-        let p2 = self.get(self.instruction_pointer + 2, m2);
-        self.set(self.instruction_pointer + 3, (p1 < p2) as i64, m3);
-    }
-
-    fn perform_equals(&mut self, m1: &ParameterMode, m2: &ParameterMode, m3: &ParameterMode) {
-        let p1 = self.get(self.instruction_pointer + 1, m1);
-        let p2 = self.get(self.instruction_pointer + 2, m2);
-        self.set(self.instruction_pointer + 3, (p1 == p2) as i64, m3);
-    }
-
-    fn perform_rba(&mut self, m1: &ParameterMode) {
-        let delta = self.get(self.instruction_pointer + 1, m1);
-        self.relative_base += delta;
-    }
-
-    fn step<'a, F>(&mut self, on_output: &mut F) -> State
-        where F: FnMut(i64) {
-
-            let instruction = self.current_instruction().unwrap();
-            let (next_state, jumped) = match &instruction { // in a real implementation, this would probably need to be wrapped in a Result or something
-                Instruction::Halt => (State::Done, false),
-                Instruction::Add { m1, m2, m3 } => {
-                    self.perform_add(&m1, &m2, &m3);
-                    (State::Running, false)
-                },
-                Instruction::Mult { m1, m2, m3 } => {
-                    self.perform_mult(&m1, &m2, &m3);
-                    (State::Running, false)
-                },
-                Instruction::Input { m1 } => {
-                    let next_input = self.input_buffer.pop_front();
-                    self.perform_input(next_input, &m1);
-                    (State::Running, false)
-                },
-                Instruction::Output { m1 } => {
-                    let output = self.get(self.instruction_pointer + 1, &m1);
-                    on_output(output);
-                    self.return_code = Some(output);
-                    (State::Running, false)
-                },
-                Instruction::JumpIfTrue { m1, m2 } => {
-                    let jumped = self.perform_jump_if(true, &m1, &m2);
-                    (State::Running, jumped)
-                },
-                Instruction::JumpIfFalse { m1, m2 } => {
-                    let jumped = self.perform_jump_if(false, &m1, &m2);
-                    (State::Running, jumped)
-                },
-                Instruction::LessThan { m1, m2, m3 } => {
-                    self.perform_less_than(&m1, &m2, &m3);
-                    (State::Running, false)
-                },
-                Instruction::Equals { m1, m2, m3 } => {
-                    self.perform_equals(&m1, &m2, &m3);
-                    (State::Running, false)
-                },
-                Instruction::RelativeBaseAdjust { m1 } => {
-                    self.perform_rba(&m1);
-                    (State::Running, false)
-                }
-            };
-            self.instruction_pointer += instruction.len(jumped);
-            next_state
-        }    
-
+    
     pub fn run_and_print(&mut self, inputs: &[i64]) -> Option<i64> {
         self.run(inputs, |x| {println!("Output: {}", &x)})
     }
 
     pub fn run<F>(&mut self, inputs: &[i64], mut on_output: F) -> Option<i64>
-        where F: FnMut(i64) {
-        for input in inputs {
-            self.read_input(*input);
+    where F: FnMut(i64) {
+        let mut inputs_iter = inputs.iter();
+        loop {
+            let state = self.step();
+            match state {
+                State::Output(out) => {
+                    on_output(out);
+                },
+                State::Crashed | State::Done => {
+                    return self.return_code;
+                },
+                State::AwaitingInput => match inputs_iter.next() {
+                    Some(input) => self.read_input(*input),
+                    None => {
+                        return self.return_code;
+                    }
+                },
+                State::Running => (),
+            }
         }
-        while let State::Running = self.step(&mut on_output) {};
-        self.return_code
     }
 
-    pub fn await_output<F>(&mut self, on_output: &mut F) -> Option<i64>
-    where F: FnMut(i64) {
-        
-        let mut last_output = None;
-        while let None = last_output {
-            if let State::Done = self.step(&mut |x| {
-                last_output = Some(x);
-                on_output(x);
-            }) {
-                break
+    pub fn await_output(&mut self) -> State {
+        loop {
+            match self.current_instruction() {
+                None => return State::Crashed,
+                Some(Instruction::Input { .. }) if self.input_buffer.is_empty() => return State::AwaitingInput,
+                _ => match self.step() {
+                    State::Running => continue,
+                    state => return state
+                }
+    
             }
-        };
-        return last_output
+        }
     }
 
     pub fn is_terminated(&self) -> bool {
@@ -197,9 +228,12 @@ impl Program {
 }
 
 #[derive(PartialEq, Debug)]
-enum State {
+pub enum State {
+    Output(i64),
+    AwaitingInput,
     Running,
-    Done
+    Done,
+    Crashed
 }
 
 
@@ -217,22 +251,6 @@ enum Instruction {
 }
 
 impl Instruction {
-    fn len(&self, jump: bool) -> usize {
-        match self {
-            _ if jump => 0,
-            Instruction::Halt => 1,
-            Instruction::Add { .. } => 4,
-            Instruction::Mult { .. } => 4,
-            Instruction::Input { .. } => 2,
-            Instruction::Output { .. } => 2,
-            Instruction::JumpIfTrue { .. } => 3,
-            Instruction::JumpIfFalse { .. } => 3,
-            Instruction::LessThan { .. } => 4,
-            Instruction::Equals { .. } => 4,
-            Instruction::RelativeBaseAdjust { .. } => 2
-        }
-    }
-
     fn parse(abcde: &i64) -> Option<Instruction> {
         match abcde.rem_euclid(100) {
             99 => Some(Instruction::Halt),
@@ -331,33 +349,29 @@ mod day02_tests {
     #[test]
     fn add_spec() {
         let mut program = Program::from_str("1,0,0,0,99");
-        let mut output_count = 0;
-        assert_eq!(program.step(&mut |_| { output_count += 1}), State::Running);
+        assert_eq!(program.step(), State::Done);
         assert_eq!(program.memory[..], [2,0,0,0,99]);
         assert_eq!(program.instruction_pointer, 4);
 
-        assert_eq!(program.step(&mut |_| { output_count += 1}), State::Done);
-        assert_eq!(output_count, 0);
+        assert_eq!(program.step(), State::Done);
     }
 
     #[test]
     fn multiply_spec() {
         let mut program = Program::from_str("2,3,0,3,99");
-        let mut output_count = 0;
 
-        assert_eq!(program.step(&mut |_| { output_count += 1}), State::Running);
+        assert_eq!(program.step(), State::Done);
         assert_eq!(program.memory[..], [2,3,0,6,99]);
         assert_eq!(program.instruction_pointer, 4);
 
-        assert_eq!(program.step(&mut |_| { output_count += 1}), State::Done);
-        assert_eq!(output_count, 0);
+        assert_eq!(program.step(), State::Done);
 
         let mut program = Program::from_str("2,4,4,5,99,0");
-        assert_eq!(program.step(&mut |_| { output_count += 1}), State::Running);
+        assert_eq!(program.step(), State::Done);
         assert_eq!(program.memory[..], [2,4,4,5,99,9801]);
         assert_eq!(program.instruction_pointer, 4);
 
-        assert_eq!(program.step(&mut |_| { output_count += 1}), State::Done);
+        assert_eq!(program.step(), State::Done);
     }
 }
 
@@ -368,60 +382,31 @@ mod day05_tests {
     #[test]
     fn equal_test() {
         let mut program = Program::from_str("3,9,8,9,10,9,4,9,99,-1,8");
-        let mut last_output = None;
 
         program.read_input(8);
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-        assert_eq!(last_output, None);
+        assert_eq!(program.step(), State::Running);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(1));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Output(1));
 
         let mut program = Program::from_str("3,9,8,9,10,9,4,9,99,-1,8");
         program.read_input(17);
-        last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-        assert_eq!(last_output, None);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(0));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(0));
 
         let mut program = Program::from_str("3,3,1108,-1,8,3,4,3,99");
         program.read_input(8);
-        last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-        assert_eq!(last_output, None);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(1));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(1));
 
         let mut program = Program::from_str("3,3,1108,-1,8,3,4,3,99");
         program.read_input(-17);
-        last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(0));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(0));
     }
 
     #[test]
@@ -429,149 +414,81 @@ mod day05_tests {
         let code = "3,9,7,9,10,9,4,9,99,-1,8";
         let mut program = Program::from_str(code);
         program.read_input(-17);
-
-        let mut last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(1));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(1));
 
         let mut program = Program::from_str(code);
         program.read_input(8);
-        last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(0));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(0));
 
         let mut program = Program::from_str(code);
         program.read_input(31);
-        last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(0));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(0));
 
         let code = "3,3,1107,-1,8,3,4,3,99";
         let mut program = Program::from_str(code);
         program.read_input(-17);
-        last_output = None;
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, None);
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(1));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(1));
 
         let mut program = Program::from_str(code);
         program.read_input(8);
-        last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-        assert_eq!(last_output, None);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(0));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(0));
 
         let mut program = Program::from_str(code);
         program.read_input(31);
-        last_output = None;
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-        assert_eq!(last_output, None);
-
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(0));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Running);
+        assert_eq!(program.step(), State::Output(0));
     }
 
     #[test]
     fn jump_test() {
         let code = "3,12,6,12,15,1,13,14,13,4,13,99,-1,0,1,9";
         let mut program = Program::from_str(code);
-        let mut last_output = None;
         program.read_input(0);
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 2);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 9);
-        assert_eq!(last_output, None);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some(0));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Output(0));
 
         let mut program = Program::from_str(code);
         program.read_input(-17);
-        last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 2);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 5);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 9);
-        assert_eq!(last_output, None);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-        assert_eq!(last_output, Some(1));
+        assert_eq!(program.step(), State::Output(1));
         assert_eq!(program.instruction_pointer, 11);
 
         let mut program = Program::from_str(code);
         program.read_input(42);
-        last_output = None;
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 2);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 5);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 9);
-        assert_eq!(last_output, None);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
-        assert_eq!(last_output, Some(1));
+        assert_eq!(program.step(), State::Output(1));
         assert_eq!(program.instruction_pointer, 11);
     }
 
@@ -581,93 +498,87 @@ mod day05_tests {
         let mut program = Program::from_str(code);
         let input = 0;
         program.read_input(input);
-        let mut last_output = None;
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 2);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 5);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 9);
-        assert_eq!(last_output, None);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some((input != 0) as i64));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Output((input != 0) as i64));
 
         let mut program = Program::from_str(code);
         let input = 17;
         program.read_input(input);
-        last_output = None;
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 2);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 9);
-        assert_eq!(last_output, None);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some((input != 0) as i64));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Output((input != 0) as i64));
 
         let mut program = Program::from_str(code);
         let input = -256;
         program.read_input(input);
-        last_output = None;
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 2);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Running);
         assert_eq!(program.instruction_pointer, 9);
-        assert_eq!(last_output, None);
 
-        let state = program.step(&mut |x| {last_output = Some(x)});
-        assert_eq!(last_output, Some((input != 0) as i64));
-        assert_eq!(state, State::Running);
+        assert_eq!(program.step(), State::Output((input != 0) as i64));
     }
 
     #[test]
     fn longer_test() {
         let code = "3,21,1008,21,8,20,1005,20,22,107,8,21,20,1006,20,31,1106,0,36,98,0,0,1002,21,125,20,4,20,1105,1,46,104,999,1105,1,46,1101,1000,1,20,4,20,1105,1,46,98,99";
 
-        let mut last_output = None;
-
         let mut program = Program::from_str(code);
         program.read_input(-3);
-        while let None = last_output {
-            program.step(&mut |x| {last_output = Some(x)});
+        loop {
+            match program.step() {
+                State::Crashed | State::Done => panic!(),
+                State::Output(x) => {
+                    assert_eq!(x, 999);
+                    break
+                },
+                _ => () // continue
+            }
         }
-        assert_eq!(last_output, Some(999));
 
         let mut program = Program::from_str(code);
         program.read_input(8);
-        last_output = None;
 
-        while let None = last_output {
-            program.step(&mut |x| {last_output = Some(x)});
+        loop {
+            match program.step() {
+                State::Crashed | State::Done => panic!(),
+                State::Output(x) => {
+                    assert_eq!(x, 1000);
+                    break
+                },
+                _ => () // continue
+            }
         }
-        assert_eq!(last_output, Some(1000));
-
 
         let mut program = Program::from_str(code);
         program.read_input(88);
-        last_output = None;
 
-        while let None = last_output {
-            program.step(&mut |x| {last_output = Some(x)});
+        loop {
+            match program.step() {
+                State::Crashed | State::Done => panic!(),
+                State::Output(x) => {
+                    assert_eq!(x, 1001);
+                    break
+                },
+                _ => () // continue
+            }
         }
-        assert_eq!(last_output, Some(1001));
     }
 
     #[test]
@@ -677,7 +588,7 @@ mod day05_tests {
         let program2 = program.clone();
 
         program.read_input(-1);
-        program.step(&mut |_| { });
+        program.step();
 
         assert_ne!(program.instruction_pointer, program2.instruction_pointer);
     }
