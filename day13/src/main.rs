@@ -101,9 +101,6 @@ impl fmt::Display for Game {
 
 fn play_single_move(game: &mut Game, program: &mut intcode::Program) -> Option<Error> {
     loop {
-        if game.tiles.len() > 1000 {
-            // println!("Breakpoint") // breakpoint
-        };
         let state1 = program.await_output();
         match state1 {
             intcode::State::AwaitingInput => return None,
@@ -119,7 +116,7 @@ fn play_single_move(game: &mut Game, program: &mut intcode::Program) -> Option<E
             intcode::State::Running => {
                 eprintln!("await_output() returned State::Running, this should never happen")
             },
-            intcode::State::Output(x) => {
+            intcode::State::Output(x) | intcode::State::OutputAwaitingInput(x) => {
                 let state2 = program.await_output();
                 match state2 {
                     intcode::State::AwaitingInput | intcode::State::Crashed | intcode::State::Done => {
@@ -130,7 +127,7 @@ fn play_single_move(game: &mut Game, program: &mut intcode::Program) -> Option<E
                     intcode::State::Running => {
                         eprintln!("await_output() returned State::Running, this should never happen")
                     },
-                    intcode::State::Output(y) => {
+                    intcode::State::Output(y) | intcode::State::OutputAwaitingInput(y) => {
                         let state3 = program.await_output();
                         match state3 {
                             intcode::State::AwaitingInput | intcode::State::Crashed | intcode::State::Done => {
@@ -141,7 +138,7 @@ fn play_single_move(game: &mut Game, program: &mut intcode::Program) -> Option<E
                             intcode::State::Running => {
                                 eprintln!("await_output() returned State::Running, this should never happen")
                             },
-                            intcode::State::Output(tile_code) => {
+                            intcode::State::Output(tile_code) | intcode::State::OutputAwaitingInput(tile_code) => {
                                 match (x,y) {
                                     (-1, 0) => game.score = tile_code,
                                     _ => if let Some(tile) = Tile::from_int(tile_code) {

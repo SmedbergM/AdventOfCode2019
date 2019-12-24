@@ -76,28 +76,33 @@ impl Canvas {
             let current_white = self.white.contains(&self.xy.to_pair());
             self.program.read_input(current_white as i64);
 
-            let output = self.program.await_output(&mut |_| {});
+            let output = self.program.await_output();
             match output {
-                Some(1) => {
+                intcode::State::Output(1) => {
                     self.white.insert(self.xy.to_pair());
                     p.insert(self.xy.to_pair());
                 },
-                Some(0) => {
+                intcode::State::Output(0) => {
                     self.white.remove(&self.xy.to_pair());
                     p.insert(self.xy.to_pair());
                 },
-                None => break,
-                Some(x) => eprintln!("Unexpected output {} from intcode!", x)
-            };
+                other => {
+                    eprintln!("Unexpected output {:?} from intcode!", &other);
+                }
+            }
 
-            let output = self.program.await_output(&mut |_| {});
+            let output = self.program.await_output();
             match output {
-                Some(x) => {
+                intcode::State::Output(x) | intcode::State::OutputAwaitingInput(x) => {
                     let next_heading = self.heading.turn(x == 0);
                     self.xy.incr(&next_heading);
                     self.heading = next_heading;
                 },
-                None => break
+                intcode::State::Done => break,
+                other => {
+                    eprintln!("Unexpected output {:?} from intcode!", &other);
+                    break
+                }
             }
         };
         p.len()

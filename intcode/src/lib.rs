@@ -163,8 +163,15 @@ impl Program {
             },
             StepResult::Output(out) => {
                 self.instruction_pointer += 2;
-                return State::Output(out);
-            }
+                match self.current_instruction() {
+                    Some(Instruction::Input { .. }) => {
+                        return State::OutputAwaitingInput(out)
+                    },
+                    _ => {
+                        return State::Output(out)
+                    }
+                }
+            },
             StepResult::Fwd(len) => {
                 self.instruction_pointer += len;
             },
@@ -172,7 +179,7 @@ impl Program {
         };
         match self.current_instruction() {
             Some(Instruction::Halt) => State::Done,
-            Some(Instruction::Input { .. }) => State::AwaitingInput,
+            Some(Instruction::Input { .. }) if self.input_buffer.is_empty() => State::AwaitingInput,
             None => State::Crashed,
             _ => State::Running
         }
@@ -184,37 +191,51 @@ impl Program {
 
     pub fn run<F>(&mut self, inputs: &[i64], mut on_output: F) -> Option<i64>
     where F: FnMut(i64) {
-        let mut inputs_iter = inputs.iter();
+        for input in inputs {
+            self.read_input(*input);
+        }
         loop {
-            let state = self.step();
+            let state = self.await_output();
             match state {
                 State::Output(out) => {
                     on_output(out);
+                    continue
                 },
-                State::Crashed | State::Done => {
-                    return self.return_code;
+                State::Done => return self.return_code,
+                State::Crashed => {
+                    eprintln!("Program reports crashed state");
+                    return self.return_code
                 },
-                State::AwaitingInput => match inputs_iter.next() {
-                    Some(input) => self.read_input(*input),
-                    None => {
-                        return self.return_code;
-                    }
+                State::AwaitingInput if self.input_buffer.is_empty() => {
+                    eprintln!("Program wants input but none available");
+                    return self.return_code
                 },
-                State::Running => (),
+                State::AwaitingInput => continue,
+                State::OutputAwaitingInput(out) if self.input_buffer.is_empty() => {
+                    on_output(out);
+                    eprintln!("Program wants input but none available");
+                    return self.return_code
+                },
+                State::OutputAwaitingInput(out) => {
+                    on_output(out);
+                    continue
+                },
+                State::Running => continue
             }
         }
     }
 
     pub fn await_output(&mut self) -> State {
-        loop {
-            match self.current_instruction() {
-                None => return State::Crashed,
-                Some(Instruction::Input { .. }) if self.input_buffer.is_empty() => return State::AwaitingInput,
-                _ => match self.step() {
-                    State::Running => continue,
-                    state => return state
+        match self.current_instruction() {
+            None => State::Crashed,
+            Some(Instruction::Input { .. }) if self.input_buffer.is_empty() => State::AwaitingInput,
+            _ => {
+                loop {
+                    match self.step() {
+                        State::Running => continue,
+                        state => return state
+                    }
                 }
-    
             }
         }
     }
@@ -230,6 +251,7 @@ impl Program {
 #[derive(PartialEq, Debug)]
 pub enum State {
     Output(i64),
+    OutputAwaitingInput(i64),
     AwaitingInput,
     Running,
     Done,
