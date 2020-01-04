@@ -246,6 +246,10 @@ impl Program {
             _ => false
         }
     }
+
+    pub fn overwrite_memory(&mut self, idx: usize, word: i64) {
+        self.memory[idx] = word;
+    }
 }
 
 #[derive(PartialEq, Debug)]
